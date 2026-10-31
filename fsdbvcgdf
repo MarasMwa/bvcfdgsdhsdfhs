@@ -28,6 +28,7 @@ end
 
 -- forward declarations
 local visualCleanup
+local openDiscord
 local showPage, paintVisuals
 local page = "main"
 
@@ -579,16 +580,52 @@ local bpad = Instance.new("UIPadding")
 bpad.PaddingLeft = UDim.new(0, 6)
 bpad.Parent = botPanel
 
-local botLabel = Instance.new("TextLabel")
+-- Animasyonlu Discord yazısı (yazılır, bekler, geriye silinir, tekrar yazılır)
+local botLabel = Instance.new("TextButton")
 botLabel.LayoutOrder = 0
-botLabel.Size = UDim2.fromOffset(92, 20)
+botLabel.Size = UDim2.fromOffset(340, 20)
 botLabel.BackgroundTransparency = 1
 botLabel.Font = Enum.Font.GothamBold
 botLabel.TextSize = 12
-botLabel.TextColor3 = WHITE
+botLabel.TextColor3 = Color3.fromRGB(114, 137, 218)
 botLabel.TextXAlignment = Enum.TextXAlignment.Left
-botLabel.Text = "Bots 0/0"
+botLabel.Text = "dont forget to join discord .gg/A4VurQvZt"
+botLabel.MaxVisibleGraphemes = 0
+botLabel.AutoButtonColor = false
 botLabel.Parent = botPanel
+botLabel.MouseButton1Click:Connect(function() if openDiscord then openDiscord() end end)
+
+local BOT_MESSAGES = {
+    "dont forget to join discord .gg/A4VurQvZt",
+    "click here to copy the discord link",
+    "new updates drop in the discord",
+    "type /visuals for auras, rtx and skyboxes",
+    "celeste is madly in love with lina",
+    "press RightControl to hide the menu",
+    "did you know? this script's developer is celeste",
+}
+
+task.spawn(function()
+    local idx = 0
+    while gui.Parent do
+        idx = idx % #BOT_MESSAGES + 1
+        local msg = BOT_MESSAGES[idx]
+        botLabel.Text = msg
+        local n = utf8.len(msg) or #msg
+        for i = 0, n do
+            if not gui.Parent then return end
+            botLabel.MaxVisibleGraphemes = i
+            task.wait(0.05)
+        end
+        task.wait(1.8)
+        for i = n, 0, -1 do
+            if not gui.Parent then return end
+            botLabel.MaxVisibleGraphemes = i
+            task.wait(0.03)
+        end
+        task.wait(0.4)
+    end
+end)
 
 -- Kime gidecek bilgi satırı
 local targetLabel = Instance.new("TextLabel")
@@ -625,7 +662,7 @@ local OPTION_CMDS = {
     ["!time"] = { "0.5", "1", "2", "3", "5" },
 }
 
-local SLASH_CMDS = { "/c", "/visuals", "/return", "/aura", "/rtx", "/sky" }
+local SLASH_CMDS = { "/c", "/visuals", "/return", "/aura", "/rtx", "/sky", "/discord" }
 local SLASH_NEEDS_ARG = { ["/aura"] = true, ["/rtx"] = true, ["/sky"] = true }
 
 local function focusBar()
@@ -658,13 +695,27 @@ local function nameMatches(p, word)
         or p.DisplayName:lower():sub(1, #word) == word:lower()
 end
 
+-- ===================== DISCORD =====================
+local DISCORD_CODE = "A4VurQvZt"
+local DISCORD_URL = "https://discord.gg/" .. DISCORD_CODE
+
+-- sadece linki panoya kopyalar (mesaj/bildirim yok)
+openDiscord = function()
+    pcall(function()
+        if setclipboard then setclipboard(DISCORD_URL)
+        elseif toclipboard then toclipboard(DISCORD_URL) end
+    end)
+end
+
 -- Bar'daki metni çalıştırır (Enter ile birebir aynı)
 local function submit(raw)
     local text = (raw:gsub("%s+$", ""))
     if (text:gsub("%s", "")) == "" then return end
     local lower = text:lower()
     local sc = lower:match("^/(%a+)")
-    if lower == "/c" then
+    if lower == "/discord" then
+        openDiscord()
+    elseif lower == "/c" then
         setChatMode(not chatMode)
     elseif lower:sub(1, 3) == "/c " then
         say(text:sub(4))
@@ -826,17 +877,15 @@ end
 local lastSig = ""
 local function renderBots()
     local list = sortedBots(false)
-    local sig, onCount = {}, 0
+    local sig = {}
     for _, name in ipairs(list) do
         local on = bots[name].on
-        if on then onCount = onCount + 1 end
         table.insert(sig, name .. (on and ":1" or ":0"))
     end
     sig = table.concat(sig, "|")
     if sig == lastSig then return end
     lastSig = sig
 
-    botLabel.Text = ("Bots %d/%d on"):format(onCount, #list)
     for _, c in ipairs(botPanel:GetChildren()) do
         if c:IsA("TextButton") then c:Destroy() end
     end
@@ -921,6 +970,16 @@ layout.Padding = UDim.new(0, 2)
 layout.SortOrder = Enum.SortOrder.LayoutOrder
 layout.Parent = scroll
 
+-- Komut ismini (!fling, /visuals ...) kırmızı yapar, geri kalanı aynı bırakır
+local CMD_COLOR = "#ff5555"
+local function colorCmd(text)
+    local cmdPart, rest = text:match("^([!/]%S+)(.*)$")
+    if cmdPart then
+        return '<font color="' .. CMD_COLOR .. '">' .. cmdPart .. "</font>" .. rest
+    end
+    return text
+end
+
 local order = 0
 local function header(text, color)
     order = order + 1
@@ -948,7 +1007,7 @@ local function row(text, cmd, mode)
     b.BorderSizePixel = 0
     b.TextWrapped = true
     b.RichText = true
-    b.Text = text
+    b.Text = colorCmd(text)
     b.TextXAlignment = Enum.TextXAlignment.Left
     b.TextYAlignment = Enum.TextYAlignment.Top
     b.Font = Enum.Font.Code
@@ -978,7 +1037,7 @@ local function row(text, cmd, mode)
     end
 end
 
-header("Usable by you AND whitelisted players:", "#ffffff")
+header("Usable by you AND whitelisted players:", "#57F287")
 row("!fling &lt;user&gt;  fling once", "!fling", "arg")
 row("!bring  take the gun, tp to you, reset (delivers the gun to you)", "!bring", "say")
 row("!abring  keep doing !bring every time the gun is caught, !stop to end", "!abring", "say")
@@ -987,7 +1046,7 @@ row("!unwhitelist &lt;user&gt;  remove from whitelist", "!unwhitelist", "arg")
 row("!list  show whitelist and loop list", "!list", "say")
 row('!info  sheriff/murderer info (also written to chat, whitelisted shown as "whitelisted")', "!info", "say")
 
-header("Usable ONLY from your own account (or the main account, id bound):", "#ffffff")
+header("Usable ONLY from your own account (or the main account, id bound):", "#FEE75C")
 row("!flingall  fling everyone once (whitelist skipped)", "!flingall", "say")
 row("!loopall  keep flinging everyone (whitelist skipped), !stop ends it", "!loopall", "say")
 row("!loop &lt;user&gt;  loop forever (saved list, survives rejoin)", "!loop", "arg")
@@ -1010,7 +1069,7 @@ row("!norender on|off  3D rendering off + black screen", "!norender", "arg")
 row("!dance [name]  dance forever, can't be stopped. Click, then pick: jamal, kick, fly...", "!dance", "arg")
 row("!help  print this list to the F9 console", "!help", "say")
 
-header("Local (this client only):", "#ffffff")
+header("Local (this client only):", "#F2BDCD")
 row("/visuals  open the visuals page (auras, RTX, skyboxes)", "visuals", "page")
 
 -- ===================== VISUALS PAGE =====================
@@ -1056,7 +1115,7 @@ local function vrow(text, onClick)
     b.BorderSizePixel = 0
     b.TextWrapped = true
     b.RichText = true
-    b.Text = text
+    b.Text = colorCmd(text)
     b.TextXAlignment = Enum.TextXAlignment.Left
     b.TextYAlignment = Enum.TextYAlignment.Top
     b.Font = Enum.Font.Code
@@ -1110,7 +1169,7 @@ local rtxBtn
 
 vrow("/return  back to bot control", function() showPage("main") end)
 
-vheader("Auras  (/aura <name> | /aura off)", "#7fd1ff")
+vheader("Auras  (/aura &lt;name&gt; | /aura off)", "#7fd1ff")
 do
     local g = vgrid()
     for _, name in ipairs(AURA_NAMES) do
@@ -1126,7 +1185,7 @@ do
     rtxBtn = gridButton(g, "RTX: OFF", function() setRTX(not rtxOn) end)
 end
 
-vheader("Custom skybox  (/sky <name> | /sky off)", "#c792ea")
+vheader("Custom skybox  (/sky &lt;name&gt; | /sky off)", "#c792ea")
 do
     local g = vgrid()
     for _, name in ipairs(SKY_ORDER) do
