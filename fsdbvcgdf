@@ -1,0 +1,1273 @@
+getgenv().MenuKey = Enum.KeyCode.RightControl
+
+--//------------------------------------------------------------------------------------------\\--
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TextChatService = game:GetService("TextChatService")
+local RS = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+if getgenv().StandCleanup then pcall(getgenv().StandCleanup) end
+if getgenv().LinaUI then pcall(function() getgenv().LinaUI:Destroy() end) end
+
+local TITLE_NAME = "lina's stand control cmd"
+local startTime = os.time()
+
+local conns = {}
+local function connect(sig, fn)
+    local c = sig:Connect(fn)
+    table.insert(conns, c)
+    return c
+end
+
+-- forward declarations
+local visualCleanup
+local showPage, paintVisuals
+local page = "main"
+
+-- GUI parent (with fallbacks)
+local parent
+pcall(function() if gethui then parent = gethui() end end)
+if not parent then pcall(function() parent = game:GetService("CoreGui") end) end
+if not parent then parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = TITLE_NAME
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 999
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+gui.Parent = parent
+getgenv().LinaUI = gui
+print("[Stand] GUI loaded, parent:", parent:GetFullName())
+
+getgenv().StandCleanup = function()
+    pcall(function() if visualCleanup then visualCleanup() end end)
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    conns = {}
+    if gui then gui:Destroy() end
+end
+
+-- Chat'e yazar
+local function say(msg)
+    local ok = pcall(function()
+        if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+            TextChatService.TextChannels.RBXGeneral:SendAsync(msg)
+        else
+            RS.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(msg, "All")
+        end
+    end)
+    if not ok then warn("[Stand] Could not send chat message") end
+end
+
+-- ===================== EMOTES =====================
+local EMOTES = {
+    { name = "Take the L", id = "74430100028293" },
+    { name = "Gamgam Style", id = "129764254213842" },
+    { name = "Fly", id = "77529400769588" },
+    { name = "Zombie Walk", id = "81931167118728" },
+    { name = "Jamal Brasil", id = "83796130837213" },
+    { name = "Insane Bug", id = "86036950557685" },
+    { name = "Kick", id = "92249489340640" },
+    { name = "Mini Box", id = "113994067684875" },
+}
+
+-- "!dance jamal" -> "!dance 83796130837213" (botlar id alir)
+local function resolveDance(text)
+    local at, rest = text:match("^(@%S+%s+)(.*)$")
+    if not at then at, rest = "", text end
+    local arg = rest:match("^!dance%s+(.+)$")
+    if not arg then return text end
+    local a = (arg:lower():gsub("%s+$", ""))
+    for _, e in ipairs(EMOTES) do
+        local n = e.name:lower()
+        local nospace = (n:gsub("%s", ""))
+        local first = n:match("^(%S+)")
+        if a == n or a == nospace or a == first or a == e.id then
+            if e.id == "83796130837213" then return at .. "!dance" end
+            return at .. "!dance " .. e.id
+        end
+    end
+    return text
+end
+
+-- ===================== STAND KÖPRÜSÜ (komut kuyruğu) =====================
+local CHANNEL = "stand_cmd.json"
+local MAX_QUEUE = 30
+local queue, seq = {}, 0
+local selectedBots = {} -- [name] = true  (botPanel'den seçilen hedef botlar)
+
+pcall(function()
+    if type(isfile) == "function" and isfile(CHANNEL) then
+        local d = HttpService:JSONDecode(readfile(CHANNEL))
+        if type(d) == "table" and type(d.seq) == "number" then seq = d.seq end
+    end
+end)
+
+-- Hedef öncelik: "@isim ..." > botPanel'den seçili botlar > hepsi
+local function sendToStand(text)
+    local to, msg = "all", text
+    local t, rest = text:match("^@(%S+)%s+(.+)$")
+    if t then
+        to, msg = t, rest
+    elseif next(selectedBots) then
+        local names = {}
+        for name in pairs(selectedBots) do table.insert(names, name) end
+        table.sort(names)
+        to = table.concat(names, ",")
+    end
+    seq = seq + 1
+    table.insert(queue, { n = seq, to = to, msg = msg })
+    while #queue > MAX_QUEUE do table.remove(queue, 1) end
+    local ok = pcall(writefile, CHANNEL, HttpService:JSONEncode({ seq = seq, cmds = queue }))
+    if not ok then warn("[Stand] Could not write command file") end
+end
+
+-- Chat modu: açıkken komutlar chat'e gider, "@isim ..." ile başlayanlar yine köprüden o hesaba gider
+local chatMode = false
+local function dispatch(text)
+    if chatMode and not text:match("^@%S+%s+.+$") then
+        say(text)
+    else
+        sendToStand(resolveDance(text))
+    end
+end
+
+-- ===================== BAĞLI BOTLAR =====================
+local BOT_DIR = "stand_bots"
+local BOT_TTL = 6
+local BOT_HIDE = 300
+local bots = {}
+
+pcall(function()
+    if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(BOT_DIR) then
+        makefolder(BOT_DIR)
+    end
+end)
+
+local function refreshBots()
+    if type(listfiles) ~= "function" or type(isfolder) ~= "function" or not isfolder(BOT_DIR) then return end
+    local ok, files = pcall(listfiles, BOT_DIR)
+    if not ok or type(files) ~= "table" then return end
+    local now = os.time()
+    local seen = {}
+    for _, path in ipairs(files) do
+        local ok2, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+        if ok2 and type(data) == "table" and type(data.name) == "string" and type(data.ts) == "number" then
+            local age = now - data.ts
+            if age <= BOT_HIDE then
+                seen[data.name] = true
+                bots[data.name] = { on = age <= BOT_TTL, ts = data.ts }
+            end
+        end
+    end
+    for name in pairs(bots) do
+        if not seen[name] then
+            bots[name] = nil
+            selectedBots[name] = nil
+        end
+    end
+end
+
+local function sortedBots(onlyOn)
+    local t = {}
+    for name, b in pairs(bots) do
+        if not onlyOn or b.on then table.insert(t, name) end
+    end
+    table.sort(t, function(a, b) return a:lower() < b:lower() end)
+    return t
+end
+-- =======================================================================
+
+local function corner(o, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = o
+end
+
+local PINK = Color3.fromHex("F2BDCD") -- sadece visuals sayfası kullanır
+local WHITE = Color3.fromRGB(235, 235, 240)
+local GREEN = Color3.fromRGB(110, 230, 140)
+local RED = Color3.fromRGB(235, 100, 110)
+
+-- ===================== VISUALS (sadece bu client) =====================
+local AURA_ASSETS = {
+    starlight = "rbxassetid://134645216613107",
+    heavenly = "rbxassetid://139300897520961",
+    ribbon = "rbxassetid://132069507632161",
+    sakura = "rbxassetid://81755778619404",
+    angel = "rbxassetid://97658130917593",
+    wind = "rbxassetid://80694081850877",
+    flow = "rbxassetid://119913533725648",
+    star = "rbxassetid://73754563740680",
+}
+local AURA_NAMES = { "angel", "starlight", "heavenly", "ribbon", "sakura", "wind", "flow", "star" }
+local auraAssets, auraSel, auraParts = {}, {}, {}
+local auraRev = 0
+
+local function loadAura(name)
+    if auraAssets[name] ~= nil then return auraAssets[name] or nil end
+    local ok, obj = pcall(function() return game:GetObjects(AURA_ASSETS[name])[1] end)
+    auraAssets[name] = (ok and obj) or false
+    return auraAssets[name] or nil
+end
+
+local function clearAuras()
+    for _, p in ipairs(auraParts) do pcall(function() p:Destroy() end) end
+    auraParts = {}
+end
+
+local function applyAuras()
+    auraRev = auraRev + 1
+    local myRev = auraRev
+    clearAuras()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for name in pairs(auraSel) do
+        local asset = loadAura(name)
+        if myRev ~= auraRev then return end
+        if asset then
+            local clone = asset:Clone()
+            for _, part in ipairs(clone:GetChildren()) do
+                local target = char:FindFirstChild(part.Name)
+                if target then
+                    for _, child in ipairs(part:GetChildren()) do
+                        local c = child:Clone()
+                        c.Parent = target
+                        table.insert(auraParts, c)
+                    end
+                end
+            end
+            clone:Destroy()
+        end
+    end
+end
+
+local function toggleAura(name)
+    auraSel[name] = (not auraSel[name]) or nil
+    if paintVisuals then paintVisuals() end
+    task.spawn(applyAuras)
+end
+
+local function clearAuraSel()
+    auraSel = {}
+    if paintVisuals then paintVisuals() end
+    task.spawn(applyAuras)
+end
+
+-- RTX
+local RTX_PROPS = { "Brightness", "ColorShift_Bottom", "ColorShift_Top", "OutdoorAmbient", "ClockTime",
+    "FogColor", "FogEnd", "FogStart", "ExposureCompensation", "ShadowSoftness", "Ambient" }
+local rtxOn, rtxOrig, rtxObjs = false, nil, {}
+
+local function setRTX(on)
+    rtxOn = on
+    for _, o in ipairs(rtxObjs) do pcall(function() o:Destroy() end) end
+    rtxObjs = {}
+    if not on then
+        if rtxOrig then
+            for k, v in pairs(rtxOrig) do pcall(function() Lighting[k] = v end) end
+            rtxOrig = nil
+        end
+        if paintVisuals then paintVisuals() end
+        return
+    end
+    if not rtxOrig then
+        rtxOrig = {}
+        for _, k in ipairs(RTX_PROPS) do rtxOrig[k] = Lighting[k] end
+    end
+    local bloom = Instance.new("BloomEffect")
+    bloom.Name = "Bloom (Lina RTX)"
+    bloom.Intensity = 0.1
+    bloom.Threshold = 0
+    bloom.Size = 100
+    bloom.Parent = Lighting
+    table.insert(rtxObjs, bloom)
+    local rays = Instance.new("SunRaysEffect")
+    rays.Name = "SunRays (Lina RTX)"
+    rays.Intensity = 0.15
+    rays.Spread = 0.8
+    rays.Parent = Lighting
+    table.insert(rtxObjs, rays)
+    local cc = Instance.new("ColorCorrectionEffect")
+    cc.Name = "ColorCorrection (Lina RTX)"
+    cc.Saturation = 0.15
+    cc.Contrast = 0.1
+    cc.Parent = Lighting
+    table.insert(rtxObjs, cc)
+    Lighting.Brightness = 2.14
+    Lighting.ColorShift_Bottom = Color3.fromRGB(11, 0, 20)
+    Lighting.ColorShift_Top = Color3.fromRGB(240, 127, 14)
+    Lighting.OutdoorAmbient = Color3.fromRGB(34, 0, 49)
+    Lighting.ClockTime = 6.7
+    Lighting.FogColor = Color3.fromRGB(94, 76, 106)
+    Lighting.FogEnd = 1000
+    Lighting.FogStart = 0
+    Lighting.ExposureCompensation = 0.24
+    Lighting.ShadowSoftness = 0
+    Lighting.Ambient = Color3.fromRGB(59, 33, 27)
+    if paintVisuals then paintVisuals() end
+end
+
+-- Custom skybox
+local SKY_ORDER = { "Sunset", "Night", "Minecraft", "Evening", "Purple", "Pink", "Chill" }
+local SKYBOXES = {
+    Sunset = { Bk = "http://www.roblox.com/asset/?id=458016711", Dn = "http://www.roblox.com/asset/?id=458016826", Ft = "http://www.roblox.com/asset/?id=458016532", Lf = "http://www.roblox.com/asset/?id=458016655", Rt = "http://www.roblox.com/asset/?id=458016782", Up = "http://www.roblox.com/asset/?id=458016792" },
+    Night = { Bk = "rbxassetid://48020371", Dn = "rbxassetid://48020144", Ft = "rbxassetid://48020234", Lf = "rbxassetid://48020211", Rt = "rbxassetid://48020254", Up = "rbxassetid://48020383" },
+    Minecraft = { Bk = "rbxassetid://1876545003", Dn = "rbxassetid://1876544331", Ft = "rbxassetid://1876542941", Lf = "rbxassetid://1876543392", Rt = "rbxassetid://1876543764", Up = "rbxassetid://1876544642" },
+    Evening = { Bk = "http://www.roblox.com/asset/?id=7950569153", Dn = "http://www.roblox.com/asset/?id=7950570785", Ft = "http://www.roblox.com/asset/?id=7950572449", Lf = "http://www.roblox.com/asset/?id=7950573918", Rt = "http://www.roblox.com/asset/?id=7950575055", Up = "http://www.roblox.com/asset/?id=7950627627" },
+    Purple = { Bk = "rbxassetid://159454299", Dn = "rbxassetid://159454296", Ft = "rbxassetid://159454293", Lf = "rbxassetid://159454286", Rt = "rbxassetid://159454300", Up = "rbxassetid://159454288" },
+    Pink = { Bk = "rbxassetid://271042516", Dn = "rbxassetid://271077243", Ft = "rbxassetid://271042556", Lf = "rbxassetid://271042310", Rt = "rbxassetid://271042467", Up = "rbxassetid://271077958" },
+    Chill = { Bk = "rbxassetid://5084575798", Dn = "rbxassetid://5084575916", Ft = "rbxassetid://5103949679", Lf = "rbxassetid://5103948542", Rt = "rbxassetid://5103948784", Up = "rbxassetid://5084576400" },
+}
+local skyOn, skyType, skyOrig, skyMade = false, "Sunset", nil, nil
+
+local function baseSky()
+    for _, o in ipairs(Lighting:GetChildren()) do
+        if o:IsA("Sky") and o ~= skyMade then return o end
+    end
+    return nil
+end
+
+local function setSky(on, typ)
+    if typ then skyType = typ end
+    skyOn = on
+    if on then
+        local data = SKYBOXES[skyType]
+        if not data then return end
+        local sky = baseSky()
+        if sky then
+            if not skyOrig then
+                skyOrig = { sky = sky, Bk = sky.SkyboxBk, Dn = sky.SkyboxDn, Ft = sky.SkyboxFt,
+                    Lf = sky.SkyboxLf, Rt = sky.SkyboxRt, Up = sky.SkyboxUp }
+            end
+        else
+            if not skyMade then
+                skyMade = Instance.new("Sky")
+                skyMade.Name = "LinaSky"
+                skyMade.Parent = Lighting
+            end
+            sky = skyMade
+        end
+        sky.SkyboxBk = data.Bk
+        sky.SkyboxDn = data.Dn
+        sky.SkyboxFt = data.Ft
+        sky.SkyboxLf = data.Lf
+        sky.SkyboxRt = data.Rt
+        sky.SkyboxUp = data.Up
+    else
+        if skyOrig and skyOrig.sky and skyOrig.sky.Parent then
+            local s = skyOrig.sky
+            s.SkyboxBk = skyOrig.Bk
+            s.SkyboxDn = skyOrig.Dn
+            s.SkyboxFt = skyOrig.Ft
+            s.SkyboxLf = skyOrig.Lf
+            s.SkyboxRt = skyOrig.Rt
+            s.SkyboxUp = skyOrig.Up
+        end
+        skyOrig = nil
+        if skyMade then skyMade:Destroy() skyMade = nil end
+    end
+    if paintVisuals then paintVisuals() end
+end
+
+visualCleanup = function()
+    pcall(setSky, false)
+    pcall(setRTX, false)
+    auraSel = {}
+    auraRev = auraRev + 1
+    clearAuras()
+end
+
+connect(LocalPlayer.CharacterAdded, function()
+    task.wait(0.6)
+    if next(auraSel) then applyAuras() end
+end)
+
+-- /visuals, /return, /aura, /rtx, /sky
+local function runVisualCmd(text)
+    local cmd, arg = text:lower():match("^/(%S+)%s*(.-)%s*$")
+    if not cmd then return false end
+    if cmd == "visuals" then showPage("visuals") return true end
+    if cmd == "return" then showPage("main") return true end
+    if cmd == "aura" then
+        if arg == "off" then
+            clearAuraSel()
+        else
+            for w in arg:gmatch("%S+") do
+                if AURA_ASSETS[w] then toggleAura(w) end
+            end
+        end
+        return true
+    end
+    if cmd == "sky" then
+        if arg == "off" then
+            setSky(false)
+        else
+            for _, k in ipairs(SKY_ORDER) do
+                if k:lower() == arg then setSky(true, k) end
+            end
+        end
+        return true
+    end
+    if cmd == "rtx" then
+        if arg == "on" then setRTX(true)
+        elseif arg == "off" then setRTX(false)
+        elseif arg == "" then setRTX(not rtxOn) end
+        return true
+    end
+    return false
+end
+-- =======================================================================
+
+-- Window
+local frame = Instance.new("CanvasGroup")
+frame.GroupTransparency = 1
+frame.Size = UDim2.fromOffset(460, 520)
+frame.Position = UDim2.new(0.5, -230, 0.5, -260)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+corner(frame)
+
+-- Open / close animations (same style as the loader)
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = 0.88
+uiScale.Parent = frame
+
+local shown = true
+local animToken = 0
+local function showFrame()
+    animToken = animToken + 1
+    shown = true
+    frame.Visible = true
+    TweenService:Create(frame, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { GroupTransparency = 0 }):Play()
+    TweenService:Create(uiScale, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+end
+local function hideFrame(after)
+    animToken = animToken + 1
+    shown = false
+    local my = animToken
+    local t = TweenService:Create(frame, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { GroupTransparency = 1 })
+    TweenService:Create(uiScale, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Scale = 0.88 }):Play()
+    t.Completed:Connect(function()
+        if my ~= animToken then return end
+        if after then after() else frame.Visible = false end
+    end)
+    t:Play()
+end
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 32)
+title.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+title.BorderSizePixel = 0
+title.Text = TITLE_NAME
+title.TextColor3 = WHITE
+title.Font = Enum.Font.GothamBold
+title.TextSize = 15
+title.Parent = frame
+corner(title)
+
+-- Running time (en solda, sadece süre)
+local timerLbl = Instance.new("TextLabel")
+timerLbl.Size = UDim2.fromOffset(62, 32)
+timerLbl.Position = UDim2.fromOffset(8, 0)
+timerLbl.BackgroundTransparency = 1
+timerLbl.Font = Enum.Font.Code
+timerLbl.TextSize = 12
+timerLbl.TextColor3 = Color3.fromRGB(150, 150, 160)
+timerLbl.TextXAlignment = Enum.TextXAlignment.Left
+timerLbl.Text = "00:00:00"
+timerLbl.Parent = title
+
+task.spawn(function()
+    while gui.Parent do
+        local e = os.time() - startTime
+        timerLbl.Text = string.format("%02d:%02d:%02d", math.floor(e / 3600), math.floor((e % 3600) / 60), e % 60)
+        task.wait(1)
+    end
+end)
+
+-- Close button
+local close = Instance.new("TextButton")
+close.Size = UDim2.fromOffset(24, 24)
+close.Position = UDim2.new(1, -30, 0, 4)
+close.BackgroundTransparency = 1
+close.BorderSizePixel = 0
+close.Text = "X"
+close.TextColor3 = Color3.new(1, 1, 1)
+close.Font = Enum.Font.GothamBold
+close.TextSize = 13
+close.Parent = title
+connect(close.MouseButton1Click, function()
+    hideFrame(function() getgenv().StandCleanup() end)
+end)
+
+-- Command bar
+local bar = Instance.new("TextBox")
+bar.Position = UDim2.fromOffset(8, 38)
+bar.Size = UDim2.new(1, -16, 0, 28)
+bar.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+bar.BorderSizePixel = 0
+bar.Text = ""
+bar.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+bar.TextColor3 = Color3.fromRGB(220, 220, 225)
+bar.Font = Enum.Font.Code
+bar.TextSize = 13
+bar.TextXAlignment = Enum.TextXAlignment.Left
+bar.ClearTextOnFocus = false
+bar.Parent = frame
+corner(bar, 6)
+local barPad = Instance.new("UIPadding")
+barPad.PaddingLeft = UDim.new(0, 8)
+barPad.Parent = bar
+
+local BAR_HINT_STAND = "command + Enter  |  /c = chat mode  |  /visuals  |  @name = one account"
+local BAR_HINT_CHAT = "CHAT MODE: commands go to chat  |  /c = back  |  @name = one account"
+local function refreshTitle()
+    title.Text = TITLE_NAME .. (chatMode and "  [CHAT]" or "") .. (page == "visuals" and "  [VISUALS]" or "")
+end
+local function setChatMode(on)
+    chatMode = on
+    refreshTitle()
+    bar.PlaceholderText = on and BAR_HINT_CHAT or BAR_HINT_STAND
+end
+setChatMode(false)
+
+-- Suggestions (isimler / on-off değerleri / aktif bot adları / dance / aura / sky)
+local chips = Instance.new("ScrollingFrame")
+chips.Position = UDim2.fromOffset(8, 70)
+chips.Size = UDim2.new(1, -16, 0, 22)
+chips.BackgroundTransparency = 1
+chips.BorderSizePixel = 0
+chips.ScrollBarThickness = 0
+chips.CanvasSize = UDim2.new()
+chips.AutomaticCanvasSize = Enum.AutomaticSize.X
+chips.ScrollingDirection = Enum.ScrollingDirection.X
+chips.Parent = frame
+local cl = Instance.new("UIListLayout")
+cl.FillDirection = Enum.FillDirection.Horizontal
+cl.Padding = UDim.new(0, 4)
+cl.Parent = chips
+
+-- Connected bots paneli
+local botPanel = Instance.new("ScrollingFrame")
+botPanel.Position = UDim2.fromOffset(8, 96)
+botPanel.Size = UDim2.new(1, -16, 0, 26)
+botPanel.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
+botPanel.BorderSizePixel = 0
+botPanel.ScrollBarThickness = 0
+botPanel.CanvasSize = UDim2.new()
+botPanel.AutomaticCanvasSize = Enum.AutomaticSize.X
+botPanel.ScrollingDirection = Enum.ScrollingDirection.X
+botPanel.Parent = frame
+corner(botPanel, 6)
+local bl = Instance.new("UIListLayout")
+bl.FillDirection = Enum.FillDirection.Horizontal
+bl.Padding = UDim.new(0, 4)
+bl.VerticalAlignment = Enum.VerticalAlignment.Center
+bl.SortOrder = Enum.SortOrder.LayoutOrder
+bl.Parent = botPanel
+local bpad = Instance.new("UIPadding")
+bpad.PaddingLeft = UDim.new(0, 6)
+bpad.Parent = botPanel
+
+local botLabel = Instance.new("TextLabel")
+botLabel.LayoutOrder = 0
+botLabel.Size = UDim2.fromOffset(92, 20)
+botLabel.BackgroundTransparency = 1
+botLabel.Font = Enum.Font.GothamBold
+botLabel.TextSize = 12
+botLabel.TextColor3 = WHITE
+botLabel.TextXAlignment = Enum.TextXAlignment.Left
+botLabel.Text = "Bots 0/0"
+botLabel.Parent = botPanel
+
+-- Kime gidecek bilgi satırı
+local targetLabel = Instance.new("TextLabel")
+targetLabel.Position = UDim2.fromOffset(8, 126)
+targetLabel.Size = UDim2.new(1, -16, 0, 18)
+targetLabel.BackgroundTransparency = 1
+targetLabel.Font = Enum.Font.Gotham
+targetLabel.TextSize = 11
+targetLabel.TextXAlignment = Enum.TextXAlignment.Left
+targetLabel.TextColor3 = Color3.fromRGB(150, 150, 160)
+targetLabel.Text = "Sending to: ALL bots"
+targetLabel.Parent = frame
+
+local function updateTargetLabel()
+    local atOverride = bar.Text:match("^@(%S+)")
+    if atOverride and atOverride ~= "" then
+        targetLabel.Text = "Sending to: @" .. atOverride .. "  (typed override)"
+        return
+    end
+    local names = {}
+    for name in pairs(selectedBots) do table.insert(names, name) end
+    table.sort(names)
+    if #names == 0 then
+        targetLabel.Text = "Sending to: ALL bots"
+    else
+        targetLabel.Text = "Sending to: " .. table.concat(names, ", ")
+    end
+end
+
+local OPTION_CMDS = {
+    ["!followmode"] = { "on", "off" },
+    ["!friends"] = { "on", "off" },
+    ["!norender"] = { "on", "off" },
+    ["!time"] = { "0.5", "1", "2", "3", "5" },
+}
+
+local SLASH_CMDS = { "/c", "/visuals", "/return", "/aura", "/rtx", "/sky" }
+local SLASH_NEEDS_ARG = { ["/aura"] = true, ["/rtx"] = true, ["/sky"] = true }
+
+local function focusBar()
+    task.defer(function()
+        bar:CaptureFocus()
+        bar.CursorPosition = #bar.Text + 1
+    end)
+end
+
+local function makeChip(label, width, color, onClick)
+    local c = Instance.new("TextButton")
+    c.Size = UDim2.fromOffset(width, 22)
+    c.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    c.BorderSizePixel = 0
+    c.Text = label
+    c.TextColor3 = color
+    c.Font = Enum.Font.Gotham
+    c.TextSize = 12
+    c.TextTruncate = Enum.TextTruncate.AtEnd
+    c.Parent = chips
+    corner(c, 5)
+    c.MouseButton1Click:Connect(function()
+        onClick()
+        focusBar()
+    end)
+end
+
+local function nameMatches(p, word)
+    return word == "" or p.Name:lower():sub(1, #word) == word:lower()
+        or p.DisplayName:lower():sub(1, #word) == word:lower()
+end
+
+-- Bar'daki metni çalıştırır (Enter ile birebir aynı)
+local function submit(raw)
+    local text = (raw:gsub("%s+$", ""))
+    if (text:gsub("%s", "")) == "" then return end
+    local lower = text:lower()
+    local sc = lower:match("^/(%a+)")
+    if lower == "/c" then
+        setChatMode(not chatMode)
+    elseif lower:sub(1, 3) == "/c " then
+        say(text:sub(4))
+    elseif sc == "visuals" or sc == "return" or sc == "aura" or sc == "rtx" or sc == "sky" then
+        runVisualCmd(text)
+    else
+        dispatch(text)
+    end
+    bar.Text = ""
+    updateTargetLabel()
+end
+
+local GREY = Color3.fromRGB(130, 130, 140)
+
+local function updateChips()
+    for _, c in ipairs(chips:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    local text = bar.Text
+
+    -- "/" yazınca: slash komutları (argsızlar direkt çalışır)
+    local slashWord = text:match("^/(%S*)$")
+    if slashWord then
+        for _, sc in ipairs(SLASH_CMDS) do
+            if sc:sub(2, 1 + #slashWord) == slashWord:lower() then
+                makeChip(sc, math.clamp(#sc * 7 + 16, 50, 100), WHITE, function()
+                    if SLASH_NEEDS_ARG[sc] then
+                        bar.Text = sc .. " "
+                    else
+                        submit(sc)
+                    end
+                end)
+            end
+        end
+        return
+    end
+
+    -- "/aura ", "/sky ", "/rtx " seçenekleri
+    local scmd, srest = text:match("^/(%S+)%s+(.*)$")
+    if scmd then
+        scmd = scmd:lower()
+        local word = (srest:match("(%S*)$") or ""):lower()
+        local items, isActive, pick
+        if scmd == "aura" then
+            items = {}
+            for _, n in ipairs(AURA_NAMES) do table.insert(items, n) end
+            table.insert(items, "off")
+            isActive = function(n) return auraSel[n] end
+            pick = function(n) if n == "off" then clearAuraSel() else toggleAura(n) end end
+        elseif scmd == "sky" then
+            items = {}
+            for _, n in ipairs(SKY_ORDER) do table.insert(items, n) end
+            table.insert(items, "off")
+            isActive = function(n) return skyOn and skyType == n end
+            pick = function(n) if n == "off" then setSky(false) else setSky(true, n) end end
+        elseif scmd == "rtx" then
+            items = { "on", "off" }
+            isActive = function(n) return (n == "on") == rtxOn end
+            pick = function(n) setRTX(n == "on") end
+        end
+        if items then
+            for _, n in ipairs(items) do
+                if word == "" or n:lower():sub(1, #word) == word then
+                    makeChip(n, math.clamp(#n * 7 + 16, 44, 100), isActive(n) and GREEN or PINK, function()
+                        pick(n)
+                        updateChips()
+                    end)
+                end
+            end
+        end
+        return
+    end
+
+    -- "@" yazınca: sadece AKTİF bot adları
+    local atWord = text:match("^@(%S*)$")
+    if atWord then
+        local n = 0
+        for _, name in ipairs(sortedBots(true)) do
+            if n < 6 and (atWord == "" or name:lower():sub(1, #atWord) == atWord:lower()) then
+                n = n + 1
+                makeChip("@" .. name, 110, WHITE, function()
+                    bar.Text = "@" .. name .. " "
+                end)
+            end
+        end
+        if n == 0 then
+            makeChip("no active bots", 110, GREY, function() end)
+        end
+        return
+    end
+
+    -- "@isim " önekini komut ayrıştırmasından çıkar
+    local atPrefix = text:match("^(@%S+%s+)") or ""
+    text = text:sub(#atPrefix + 1)
+
+    local cmdRaw = text:match("^(%S+)")
+    if not cmdRaw or cmdRaw:sub(1, 1) ~= "!" then return end
+    local cmd = cmdRaw:lower()
+    local hasSpace = text:find("%s") ~= nil
+    local word = hasSpace and (text:match("(%S*)$") or "") or ""
+
+    -- Chip'e basınca komut direkt gönderilir (Enter gerekmez)
+    local function send(value)
+        submit(atPrefix .. cmdRaw .. " " .. value)
+    end
+
+    -- !dance: dans listesi
+    if cmd == "!dance" then
+        local rest = (text:match("^%S+%s+(.*)$") or ""):lower()
+        for _, e in ipairs(EMOTES) do
+            if rest == "" or e.name:lower():find(rest, 1, true) then
+                makeChip(e.name, math.clamp(#e.name * 7 + 16, 60, 130), WHITE, function() send(e.name) end)
+            end
+        end
+        return
+    end
+
+    -- on / off ve hazır değerler
+    if OPTION_CMDS[cmd] then
+        for _, opt in ipairs(OPTION_CMDS[cmd]) do
+            if word == "" or opt:sub(1, #word) == word:lower() then
+                makeChip(opt, 56, WHITE, function() send(opt) end)
+            end
+        end
+        return
+    end
+
+    -- oyuncu kullanıcı adları
+    local n = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= Players.LocalPlayer and n < 8 and nameMatches(p, word) then
+            n = n + 1
+            makeChip(p.Name, math.clamp(#p.Name * 7 + 16, 70, 150), WHITE, function() send(p.Name) end)
+        end
+    end
+    if n == 0 then
+        makeChip("no matching players", 130, GREY, function() end)
+    end
+end
+connect(bar:GetPropertyChangedSignal("Text"), function()
+    updateChips()
+    updateTargetLabel()
+end)
+connect(Players.PlayerAdded, function() updateChips() end)
+connect(Players.PlayerRemoving, function() task.defer(updateChips) end)
+
+-- Bot butonunu seçim durumuna göre boyar
+local botButtons = {}
+local function paintBotButton(name)
+    local b = botButtons[name]
+    if not b then return end
+    local sel = selectedBots[name]
+    b.BackgroundColor3 = sel and WHITE or Color3.fromRGB(40, 40, 50)
+    local botOn = bots[name] and bots[name].on
+    b.TextColor3 = sel and Color3.fromRGB(30, 30, 34) or (botOn and Color3.fromRGB(220, 220, 225) or Color3.fromRGB(130, 130, 140))
+end
+
+-- Bots panelini çiz (bot listesi/on-off değişmediyse yeniden kurmaz)
+local lastSig = ""
+local function renderBots()
+    local list = sortedBots(false)
+    local sig, onCount = {}, 0
+    for _, name in ipairs(list) do
+        local on = bots[name].on
+        if on then onCount = onCount + 1 end
+        table.insert(sig, name .. (on and ":1" or ":0"))
+    end
+    sig = table.concat(sig, "|")
+    if sig == lastSig then return end
+    lastSig = sig
+
+    botLabel.Text = ("Bots %d/%d on"):format(onCount, #list)
+    for _, c in ipairs(botPanel:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    botButtons = {}
+
+    -- ALL: seçimi temizler, hedef "all" olur
+    local allBtn = Instance.new("TextButton")
+    allBtn.LayoutOrder = 1
+    allBtn.Size = UDim2.fromOffset(40, 20)
+    allBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    allBtn.BorderSizePixel = 0
+    allBtn.Text = "ALL"
+    allBtn.TextColor3 = WHITE
+    allBtn.Font = Enum.Font.GothamBold
+    allBtn.TextSize = 11
+    allBtn.Parent = botPanel
+    corner(allBtn, 5)
+    allBtn.MouseButton1Click:Connect(function()
+        selectedBots = {}
+        for name in pairs(botButtons) do paintBotButton(name) end
+        bar.Text = bar.Text:gsub("^@%S*%s*", "")
+        updateTargetLabel()
+        focusBar()
+    end)
+
+    for i, name in ipairs(list) do
+        local on = bots[name].on
+        local b = Instance.new("TextButton")
+        b.LayoutOrder = i + 1
+        b.Size = UDim2.fromOffset(math.clamp(#name * 7 + 38, 70, 150), 20)
+        b.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        b.BorderSizePixel = 0
+        b.RichText = true
+        b.Text = ('<font color="%s">●</font> %s <font color="%s">%s</font>'):format(
+            on and "#6ee68c" or "#eb646e", name, on and "#6ee68c" or "#eb646e", on and "on" or "off")
+        b.TextColor3 = Color3.fromRGB(220, 220, 225)
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 11
+        b.TextTruncate = Enum.TextTruncate.AtEnd
+        b.Parent = botPanel
+        corner(b, 5)
+        botButtons[name] = b
+        paintBotButton(name)
+        b.MouseButton1Click:Connect(function()
+            if selectedBots[name] then
+                selectedBots[name] = nil
+            else
+                selectedBots[name] = true
+            end
+            paintBotButton(name)
+            updateTargetLabel()
+        end)
+    end
+end
+
+task.spawn(function()
+    while gui.Parent do
+        refreshBots()
+        renderBots()
+        if bar.Text:sub(1, 1) == "@" then updateChips() end
+        task.wait(2)
+    end
+end)
+
+connect(bar.FocusLost, function(enter)
+    if enter then submit(bar.Text) end
+end)
+
+-- ===================== MAIN PAGE (bot control) =====================
+local scroll = Instance.new("ScrollingFrame")
+scroll.Position = UDim2.fromOffset(8, 150)
+scroll.Size = UDim2.new(1, -16, 1, -166)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 4
+scroll.CanvasSize = UDim2.new()
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.Parent = frame
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 2)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = scroll
+
+local order = 0
+local function header(text, color)
+    order = order + 1
+    local l = Instance.new("TextLabel")
+    l.LayoutOrder = order
+    l.Size = UDim2.new(1, -8, 0, 24)
+    l.BackgroundTransparency = 1
+    l.RichText = true
+    l.Text = '<b><font color="' .. color .. '">' .. text .. "</font></b>"
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Font = Enum.Font.Code
+    l.TextSize = 13
+    l.TextColor3 = Color3.fromRGB(220, 220, 225)
+    l.Parent = scroll
+end
+
+-- mode: "say" = direkt gönderir | "arg" = bar'a yazar, değeri yaz + Enter | "page" = sayfa açar | nil = sadece yazı
+local function row(text, cmd, mode)
+    order = order + 1
+    local b = Instance.new(mode and "TextButton" or "TextLabel")
+    b.LayoutOrder = order
+    b.Size = UDim2.new(1, -8, 0, 0)
+    b.AutomaticSize = Enum.AutomaticSize.Y
+    b.BackgroundTransparency = 1
+    b.BorderSizePixel = 0
+    b.TextWrapped = true
+    b.RichText = true
+    b.Text = text
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.TextYAlignment = Enum.TextYAlignment.Top
+    b.Font = Enum.Font.Code
+    b.TextSize = 13
+    b.TextColor3 = mode and Color3.fromRGB(220, 220, 225) or Color3.fromRGB(130, 130, 140)
+    b.Parent = scroll
+    if mode then
+        b.AutoButtonColor = false
+        connect(b.MouseEnter, function()
+            b.BackgroundColor3 = WHITE
+            b.BackgroundTransparency = 0.9
+        end)
+        connect(b.MouseLeave, function() b.BackgroundTransparency = 1 end)
+        connect(b.MouseButton1Click, function()
+            local at = bar.Text:match("^(@%S+%s+)") or ""
+            if mode == "page" then
+                showPage(cmd)
+            elseif mode == "arg" then
+                bar.Text = at .. cmd .. " "
+                updateChips()
+                updateTargetLabel()
+                focusBar()
+            else
+                dispatch(at .. cmd)
+            end
+        end)
+    end
+end
+
+header("Usable by you AND whitelisted players:", "#ffffff")
+row("!fling &lt;user&gt;  fling once", "!fling", "arg")
+row("!bring  take the gun, tp to you, reset (delivers the gun to you)", "!bring", "say")
+row("!abring  keep doing !bring every time the gun is caught, !stop to end", "!abring", "say")
+row("!whitelist &lt;user&gt;  add to whitelist (saved)", "!whitelist", "arg")
+row("!unwhitelist &lt;user&gt;  remove from whitelist", "!unwhitelist", "arg")
+row("!list  show whitelist and loop list", "!list", "say")
+row('!info  sheriff/murderer info (also written to chat, whitelisted shown as "whitelisted")', "!info", "say")
+
+header("Usable ONLY from your own account (or the main account, id bound):", "#ffffff")
+row("!flingall  fling everyone once (whitelist skipped)", "!flingall", "say")
+row("!loopall  keep flinging everyone (whitelist skipped), !stop ends it", "!loopall", "say")
+row("!loop &lt;user&gt;  loop forever (saved list, survives rejoin)", "!loop", "arg")
+row("!unloop &lt;user|all&gt;  remove from loop list", "!unloop", "arg")
+row("!stop  pause everything (fling+auto-bring)", "!stop", "say")
+row("!resume  resume the loop list", "!resume", "say")
+row("!reset  reset your character", "!reset", "say")
+row("!shoot  (sheriff) shoot the murderer once, exits/re-enters void automatically", "!shoot", "say")
+row("!killall  (murderer) knife aura for 5 seconds, exits/re-enters void automatically", "!killall", "say")
+row("!tp  teleport to the main account, exits/re-enters void automatically", "!tp", "say")
+row("!tp &lt;user&gt;  teleport to that user, exits/re-enters void automatically", "!tp", "arg")
+row('!setmain &lt;user&gt;  set the "main account" bare !tp goes to (saved)', "!setmain", "arg")
+row("!void  force the void hide on (on by default)", "!void", "say")
+row("!unvoid  force the void hide off", "!unvoid", "say")
+row("!followmode on|off  when the main account dies or !reset's, this bot auto-resets too", "!followmode", "arg")
+row("!leave  leave the game", "!leave", "say")
+row("!time &lt;0.5-5&gt;  seconds spent per player", "!time", "arg")
+row("!friends on|off  never fling your friends", "!friends", "arg")
+row("!norender on|off  3D rendering off + black screen", "!norender", "arg")
+row("!dance [name]  dance forever, can't be stopped. Click, then pick: jamal, kick, fly...", "!dance", "arg")
+row("!help  print this list to the F9 console", "!help", "say")
+
+header("Local (this client only):", "#ffffff")
+row("/visuals  open the visuals page (auras, RTX, skyboxes)", "visuals", "page")
+
+-- ===================== VISUALS PAGE =====================
+local visualsPage = Instance.new("ScrollingFrame")
+visualsPage.Position = UDim2.fromOffset(8, 150)
+visualsPage.Size = UDim2.new(1, -16, 1, -166)
+visualsPage.BackgroundTransparency = 1
+visualsPage.BorderSizePixel = 0
+visualsPage.ScrollBarThickness = 4
+visualsPage.CanvasSize = UDim2.new()
+visualsPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
+visualsPage.Visible = false
+visualsPage.Parent = frame
+
+local vlayout = Instance.new("UIListLayout")
+vlayout.Padding = UDim.new(0, 2)
+vlayout.SortOrder = Enum.SortOrder.LayoutOrder
+vlayout.Parent = visualsPage
+
+local vorder = 0
+local function vheader(text, color)
+    vorder = vorder + 1
+    local l = Instance.new("TextLabel")
+    l.LayoutOrder = vorder
+    l.Size = UDim2.new(1, -8, 0, 24)
+    l.BackgroundTransparency = 1
+    l.RichText = true
+    l.Text = '<b><font color="' .. color .. '">' .. text .. "</font></b>"
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Font = Enum.Font.Code
+    l.TextSize = 13
+    l.TextColor3 = Color3.fromRGB(220, 220, 225)
+    l.Parent = visualsPage
+end
+
+local function vrow(text, onClick)
+    vorder = vorder + 1
+    local b = Instance.new(onClick and "TextButton" or "TextLabel")
+    b.LayoutOrder = vorder
+    b.Size = UDim2.new(1, -8, 0, 0)
+    b.AutomaticSize = Enum.AutomaticSize.Y
+    b.BackgroundTransparency = 1
+    b.BorderSizePixel = 0
+    b.TextWrapped = true
+    b.RichText = true
+    b.Text = text
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.TextYAlignment = Enum.TextYAlignment.Top
+    b.Font = Enum.Font.Code
+    b.TextSize = 13
+    b.TextColor3 = onClick and Color3.fromRGB(220, 220, 225) or Color3.fromRGB(130, 130, 140)
+    b.Parent = visualsPage
+    if onClick then
+        b.AutoButtonColor = false
+        connect(b.MouseEnter, function()
+            b.BackgroundColor3 = PINK
+            b.BackgroundTransparency = 0.8
+        end)
+        connect(b.MouseLeave, function() b.BackgroundTransparency = 1 end)
+        connect(b.MouseButton1Click, onClick)
+    end
+end
+
+local function vgrid()
+    vorder = vorder + 1
+    local g = Instance.new("Frame")
+    g.LayoutOrder = vorder
+    g.Size = UDim2.new(1, -8, 0, 0)
+    g.AutomaticSize = Enum.AutomaticSize.Y
+    g.BackgroundTransparency = 1
+    g.Parent = visualsPage
+    local gl = Instance.new("UIGridLayout")
+    gl.CellSize = UDim2.fromOffset(98, 26)
+    gl.CellPadding = UDim2.fromOffset(4, 4)
+    gl.SortOrder = Enum.SortOrder.LayoutOrder
+    gl.Parent = g
+    return g
+end
+
+local function gridButton(g, label, onClick)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    b.BorderSizePixel = 0
+    b.Text = label
+    b.TextColor3 = Color3.fromRGB(220, 220, 225)
+    b.Font = Enum.Font.Gotham
+    b.TextSize = 12
+    b.AutoButtonColor = false
+    b.Parent = g
+    corner(b, 5)
+    connect(b.MouseButton1Click, onClick)
+    return b
+end
+
+local auraBtns, skyBtns = {}, {}
+local rtxBtn
+
+vrow("/return  back to bot control", function() showPage("main") end)
+
+vheader("Auras  (/aura <name> | /aura off)", "#7fd1ff")
+do
+    local g = vgrid()
+    for _, name in ipairs(AURA_NAMES) do
+        auraBtns[name] = gridButton(g, name, function() toggleAura(name) end)
+    end
+    gridButton(g, "off", function() clearAuraSel() end)
+end
+vrow("Click to stack/unstack. Aura models load on first use.")
+
+vheader("RTX mode  (/rtx on | off)", "#ffb86b")
+do
+    local g = vgrid()
+    rtxBtn = gridButton(g, "RTX: OFF", function() setRTX(not rtxOn) end)
+end
+
+vheader("Custom skybox  (/sky <name> | /sky off)", "#c792ea")
+do
+    local g = vgrid()
+    for _, name in ipairs(SKY_ORDER) do
+        skyBtns[name] = gridButton(g, name, function() setSky(true, name) end)
+    end
+    gridButton(g, "off", function() setSky(false) end)
+end
+
+paintVisuals = function()
+    local idle, idleText = Color3.fromRGB(40, 40, 50), Color3.fromRGB(220, 220, 225)
+    local activeText = Color3.fromRGB(30, 30, 34)
+    for name, b in pairs(auraBtns) do
+        local s = auraSel[name]
+        b.BackgroundColor3 = s and PINK or idle
+        b.TextColor3 = s and activeText or idleText
+    end
+    for name, b in pairs(skyBtns) do
+        local s = skyOn and skyType == name
+        b.BackgroundColor3 = s and PINK or idle
+        b.TextColor3 = s and activeText or idleText
+    end
+    if rtxBtn then
+        rtxBtn.Text = rtxOn and "RTX: ON" or "RTX: OFF"
+        rtxBtn.BackgroundColor3 = rtxOn and PINK or idle
+        rtxBtn.TextColor3 = rtxOn and activeText or idleText
+    end
+end
+paintVisuals()
+
+showPage = function(p)
+    page = p
+    scroll.Visible = (p == "main")
+    visualsPage.Visible = (p == "visuals")
+    refreshTitle()
+end
+
+-- Resize handle
+local grip = Instance.new("TextButton")
+grip.Size = UDim2.fromOffset(16, 16)
+grip.Position = UDim2.new(1, -18, 1, -18)
+grip.BackgroundTransparency = 1
+grip.BorderSizePixel = 0
+grip.Text = ""
+grip.AutoButtonColor = false
+grip.ZIndex = 5
+grip.Parent = frame
+
+local GRIP_COLOR = Color3.fromRGB(235, 235, 245)
+local GRIP_IDLE, GRIP_HOVER = 0.75, 0.35
+
+local vLine = Instance.new("Frame")
+vLine.Size = UDim2.new(0, 2, 1, 0)
+vLine.Position = UDim2.new(1, -2, 0, 0)
+vLine.BackgroundColor3 = GRIP_COLOR
+vLine.BackgroundTransparency = GRIP_IDLE
+vLine.BorderSizePixel = 0
+vLine.ZIndex = 5
+vLine.Parent = grip
+
+local hLine = Instance.new("Frame")
+hLine.Size = UDim2.new(1, 0, 0, 2)
+hLine.Position = UDim2.new(0, 0, 1, -2)
+hLine.BackgroundColor3 = GRIP_COLOR
+hLine.BackgroundTransparency = GRIP_IDLE
+hLine.BorderSizePixel = 0
+hLine.ZIndex = 5
+hLine.Parent = grip
+
+local function gripFade(t)
+    vLine.BackgroundTransparency = t
+    hLine.BackgroundTransparency = t
+end
+connect(grip.MouseEnter, function() gripFade(GRIP_HOVER) end)
+connect(grip.MouseLeave, function()
+    if not getgenv().__gripDrag then gripFade(GRIP_IDLE) end
+end)
+
+local MIN_W, MIN_H, MAX_W, MAX_H = 360, 300, 900, 820
+local resizing, rStart, rSize
+connect(grip.InputBegan, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        resizing, rStart, rSize = true, i.Position, frame.AbsoluteSize
+        getgenv().__gripDrag = true
+        gripFade(GRIP_HOVER)
+    end
+end)
+
+-- Dragging
+local dragging, dragStart, startPos
+connect(title.InputBegan, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging, dragStart, startPos = true, i.Position, frame.Position
+    end
+end)
+
+connect(UIS.InputChanged, function(i)
+    local moving = i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch
+    if not moving then return end
+    if resizing then
+        local d = i.Position - rStart
+        local w = math.clamp(rSize.X + d.X, MIN_W, MAX_W)
+        local h = math.clamp(rSize.Y + d.Y, MIN_H, MAX_H)
+        frame.Size = UDim2.fromOffset(w, h)
+    elseif dragging then
+        local d = i.Position - dragStart
+        frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end)
+
+connect(UIS.InputEnded, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+        if resizing then
+            resizing = false
+            getgenv().__gripDrag = false
+            gripFade(GRIP_IDLE)
+        end
+    end
+end)
+
+-- Toggle key (gameProcessed'e bakmaz: sadece başka bir TextBox'a yazıyorsan çalışmaz)
+connect(UIS.InputBegan, function(i)
+    if i.KeyCode ~= (getgenv().MenuKey or Enum.KeyCode.RightControl) then return end
+    local fb = UIS:GetFocusedTextBox()
+    if fb ~= nil and fb ~= bar then return end
+    if shown then
+        pcall(function() bar:ReleaseFocus() end)
+        hideFrame()
+    else
+        showFrame()
+    end
+end)
+
+-- Start: open animation + title typewriter
+showFrame()
+task.spawn(function()
+    local n = utf8.len(title.Text) or #title.Text
+    for i = 0, n do
+        if not title.Parent then return end
+        title.MaxVisibleGraphemes = i
+        task.wait(0.02)
+    end
+    title.MaxVisibleGraphemes = -1
+end)
